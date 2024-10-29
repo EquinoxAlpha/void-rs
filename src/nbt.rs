@@ -1,6 +1,3 @@
-use core::num;
-use std::{any::Any, collections::HashMap};
-
 use json::JsonValue;
 
 #[derive(Debug)]
@@ -129,106 +126,18 @@ impl NamedTag {
         }
     }
 
-    pub fn to_bytes_internal(&self, named: bool) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Vec<u8> {
         if self.tag.type_id() == 0 {
             return vec![0];
         }
 
         let mut out = vec![self.tag.type_id()];
-        if named {
-            out.extend_from_slice(&(self.name.as_bytes().len() as u16).to_be_bytes());
-            out.extend_from_slice(&self.name.as_bytes());
-        }
+        out.extend_from_slice(&(self.name.as_bytes().len() as u16).to_be_bytes());
+        out.extend_from_slice(&self.name.as_bytes());
         out.extend_from_slice(&self.tag.to_bytes());
 
         out
     }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.to_bytes_internal(true)
-
-        // match &self.tag {
-        //     NBT::End => {
-        //         return vec![0x0];
-        //     },
-        //     NBT::Byte(b) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         out.push(*b as _);
-        //         return out;
-        //     },
-        //     NBT::Short(s) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         out.extend_from_slice(&s.to_be_bytes());
-        //         return out;
-        //     },
-        //     NBT::Int(i) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         out.extend_from_slice(&i.to_be_bytes());
-        //         return out;
-        //     },
-        //     NBT::Long(l) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         out.extend_from_slice(&l.to_be_bytes());
-        //         return out;
-        //     },
-        //     NBT::Float(f) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         out.extend_from_slice(&f.to_be_bytes());
-        //         return out;
-        //     },
-        //     NBT::Double(d) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         out.extend_from_slice(&d.to_be_bytes());
-        //         return out;
-        //     },
-        //     NBT::ByteArray(vec) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         out.extend_from_slice(&(vec.len() as u16).to_be_bytes());
-        //         out.extend_from_slice(&vec);
-        //         return out;
-        //     },
-        //     NBT::String(s) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         out.extend_from_slice(&(s.as_bytes().len() as u16).to_be_bytes());
-        //         out.extend_from_slice(&s.as_bytes());
-        //         return out;
-        //     },
-        //     NBT::List(vec) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         for nbt in vec {
-        //             out.extend_from_slice();
-        //         }
-        //         out.push(0x00);
-        //         return out;
-        //     },
-        //     NBT::Compound(vec) => {
-        //         let mut out = vec![self.tag.type_id()];
-        //         add_name_if_needed(&mut out);
-        //         // out.extend_from_slice(&(vec.len() as u16).to_be_bytes());
-        //         for tag in vec {
-        //             out.extend_from_slice(&tag.to_bytes());
-        //         }
-        //         out.push(0x0);
-        //         return out;
-        //     },
-        //     NBT::IntArray(vec) => todo!(),
-        //     NBT::LongArray(vec) => todo!(),
-        // }
-        // out
-    }
-
-    // pub fn to_bytes(&self) -> Vec<u8> {
-    // return self.to_bytes_internal(true)
-    // }
 }
 
 fn from_json_object(data: json::object::Object) -> NBT {

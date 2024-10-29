@@ -287,7 +287,7 @@ impl State {
                     stream.write_all(&response).await?;
                     stream.flush().await?;
 
-                    log::info!("{} [{:?}] has connected to the login server.", self.username, self.peer);
+                    log::info!("{} [{}] has connected to the login server.", self.username, self.real_address);
 
                     match self.context.lock().await.player_exists(&self.username).await {
                         Ok(b) => match b {
@@ -367,7 +367,7 @@ impl State {
                                 {
                                     Ok(success) => match success {
                                         false => {
-                                            log::warn!("{} [{:?}] has specified an incorrect password.", self.username, self.peer);
+                                            log::warn!("{} [{}] has specified an incorrect password.", self.username, self.real_address);
                                             return self
                                                 .kick(
                                                     stream,
@@ -376,7 +376,7 @@ impl State {
                                                 .await;
                                         }
                                         true => {
-                                            log::info!("{} [{:?}] has successfully authenticated.", self.username, self.peer);
+                                            log::info!("{} [{}] has successfully authenticated.", self.username, self.real_address);
 
                                             stream
                                                 .write_all(
@@ -417,13 +417,13 @@ impl State {
                                 match self.context.lock().await.register(&self.username, password).await {
                                     Ok(success) => match success {
                                         false => {
-                                            log::warn!("{} [{:?}] attempted double registration.", self.username, self.peer);
+                                            log::warn!("{} [{}] attempted double registration.", self.username, self.real_address);
                                             return self
                                                 .kick(stream, "This user is already registered.")
                                                 .await;
                                         }
                                         true => {
-                                            log::info!("{} [{:?}] has successfully registered.", self.username, self.peer);
+                                            log::info!("{} [{}] has successfully registered.", self.username, self.real_address);
                                             stream
                                                 .write_all(
                                                     &PacketBuilder::new(0x16)
@@ -474,9 +474,9 @@ impl State {
         stream.flush().await?;
 
         return Err(anyhow!(
-            "Kicked player {} [{:?}] with reason: \"{}\"",
+            "Kicked player {} [{}] with reason: \"{}\"",
             self.username,
-            self.peer,
+            self.real_address,
             reason
         ));
     }
