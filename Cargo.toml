@@ -7,7 +7,10 @@ edition = "2021"
 anyhow = "1.0.91"
 argon2 = "0.5.3"
 json = "0.12.4"
+log = "0.4.22"
+rand = "0.8.5"
 serde = { version = "1.0.214", features = ["derive"] }
+simplelog = "0.12.2"
 surrealdb = { version = "2.0.4", features = ["kv-rocksdb"] }
 tokio = { version = "1.41.0", features = ["full"] }
 tokio-byteorder = "0.3.0"

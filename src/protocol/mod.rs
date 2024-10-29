@@ -10,7 +10,6 @@ pub mod packet;
 pub async fn read_generic_packet(reader: &mut (impl AsyncRead + std::marker::Unpin)) -> Result<(i32, Vec<u8>)> {
     let length = VarInt::read(reader).await?.into_inner();
     let packet_id = VarInt::read(reader).await?;
-    // println!("Packet ID: {}", packet_id);
     let length = length - packet_id.length() as i32;
     let mut buffer = vec![0; length as usize];
     reader.read_exact(&mut buffer).await?;

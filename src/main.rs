@@ -1,15 +1,10 @@
-use std::{collections::HashMap, io::Cursor, net::SocketAddr, sync::Arc};
-
+use std::io::Read;
+use std::{io::Cursor, net::SocketAddr, sync::Arc};
 use anyhow::anyhow;
 use anyhow::Result;
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
 use nbt::{NamedTag, NBT};
 use protocol::{packet::PacketBuilder, varint::VarInt};
-use serde::{Deserialize, Serialize};
-use surrealdb::{engine::local::RocksDb, RecordId, Surreal};
+use surrealdb::Surreal;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
@@ -17,128 +12,68 @@ use tokio::{
 };
 use tokio_byteorder::{AsyncReadBytesExt, BigEndian};
 
-pub mod login;
+pub mod db;
 pub mod nbt;
 pub mod protocol;
+
 pub struct Context {
     db: Surreal<surrealdb::engine::local::Db>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct Credentials {
-    name: String,
-    hash: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Record {
-    #[allow(dead_code)]
-    id: RecordId,
-}
-
-impl Context {
-    pub async fn player_exists(&self, name: &str) -> Result<bool> {
-        let users: Vec<Credentials> = self.db.select("credentials").await?;
-        let user = users.iter().find(|a| a.name == name);
-        Ok(user.is_some())
-    }
-
-    pub async fn register(&self, name: &str, password: &str) -> Result<bool> {
-        if self.player_exists(&name).await? {
-            return Ok(false);
-        }
-
-        let argon2 = Argon2::default();
-        let salt = SaltString::generate(&mut OsRng);
-        let hash = argon2.hash_password(password.as_bytes(), &salt)?;
-        let hash = hash.serialize().to_string();
-
-        let _: Option<Record> = self
-            .db
-            .create("credentials")
-            .content(Credentials {
-                name: name.to_string(),
-                hash,
-            })
-            .await?;
-
-        Ok(true)
-    }
-
-    pub async fn authenticate(&self, name: &str, password: &str) -> Result<bool> {
-        if !self.player_exists(&name).await? {
-            return Ok(false);
-        }
-
-        let argon2 = Argon2::default();
-
-        let users: Vec<Credentials> = self.db.select("credentials").await?;
-        let user = users.iter().find(|a| a.name == name);
-
-        if let Some(user) = user {
-            let hash = PasswordHash::new(&user.hash)?;
-
-            if argon2.verify_password(password.as_bytes(), &hash).is_ok() {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
-    }
-}
-
 pub struct State {
     state: i32,
-    peer: Option<SocketAddr>,
-    username: Option<String>,
+    peer: SocketAddr,
+    real_address: String,
+    username: String,
     context: Arc<Mutex<Context>>,
+    conn_id: i32,
 }
 
 impl State {
-    pub fn new(context: Arc<Mutex<Context>>) -> Self {
+    pub fn new(context: Arc<Mutex<Context>>, peer: SocketAddr) -> Self {
         State {
             state: 0,
-            peer: None,
-            username: None,
+            peer,
+            username: String::from("<name unknown>"),
+            real_address: String::from("<IP address unknown>"),
             context,
+            conn_id: rand::random(),
         }
     }
 
+    pub async fn send_packet(
+        &self,
+        stream: &mut TcpStream,
+        packet: impl Into<Vec<u8>>,
+    ) -> anyhow::Result<()> {
+        stream.write_all(&packet.into()).await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
     pub async fn receive_packet(&mut self, stream: &mut TcpStream) -> Result<()> {
-        // println!("Receiving packet");
         let (packet_id, buffer) = protocol::read_generic_packet(stream).await?;
         let mut buffer = Cursor::new(buffer);
-        // println!("Received packet with ID: {:02x}", packet_id);
 
         match self.state {
             0 => match packet_id {
                 0 => {
-                    let protocol_version = VarInt::read(&mut buffer).await?.into_inner();
-                    let server_address = protocol::read_string(&mut buffer).await?;
-                    let server_port = buffer.read_u16::<BigEndian>().await?;
+                    let _protocol_version = VarInt::read(&mut buffer).await?.into_inner();
+                    let _server_address = protocol::read_string(&mut buffer).await?;
+                    let _server_port = buffer.read_u16::<BigEndian>().await?;
                     let next_state = VarInt::read(&mut buffer).await?.into_inner();
-
-                    println!("Protocol version: {}", protocol_version);
-                    println!("Server address: {}", server_address);
-                    println!("Server port: {}", server_port);
-                    println!("Next state: {}", next_state);
 
                     self.state = next_state;
                 }
-                _ => {
-                    println!("Handshake: Unknown packet ID");
-                }
+                _ => ()
             },
             1 => match packet_id {
                 0 => {
-                    println!("Status request");
-
                     let payload = include_str!("status_response.json");
 
                     let response = PacketBuilder::new(0x00).with_string(payload).build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
+                    self.send_packet(stream, response).await?;
                 }
                 1 => {
                     let payload = buffer.read_i64::<BigEndian>().await?;
@@ -148,29 +83,72 @@ impl State {
                         .await?;
                     stream.flush().await?;
                 }
-                _ => {
-                    println!("Status: Unknown packet ID");
-                }
+                _ => ()
             },
             2 => match packet_id {
                 0 => {
                     let username = protocol::read_string(&mut buffer).await?;
-                    // let uuid = buffer.read_u128::<BigEndian>().await?;
-                    println!("Login request: {}", username);
 
-                    self.username = Some(username.clone());
+                    self.username = username.clone();
+
+                    let response = PacketBuilder::new(0x04)
+                        .with_var_int(self.conn_id.abs())
+                        .with_string("velocity:player_info")
+                        .with_u8(1)
+                        .build();
+
+                    self.send_packet(stream, response).await?;
+                }
+                0x02 => {
+                    let message_id = VarInt::read(&mut buffer).await?;
+
+                    match buffer.read_u8().await? {
+                        1 => {
+                            let mut signature = vec![0u8; 32];
+                            buffer.read_exact(&mut signature)?;
+
+                            let version = VarInt::read(&mut buffer).await?;
+                            let address = protocol::read_string(&mut buffer).await?;
+                            let uuid = buffer.read_u128::<BigEndian>().await?;
+                            self.real_address = address;
+
+                            let username = protocol::read_string(&mut buffer).await?;
+                            self.username = username;
+                            
+                            let properties_len = VarInt::read(&mut buffer).await?;
+
+                            for _ in 0..properties_len.into_inner() {
+                                let name = protocol::read_string(&mut buffer).await?;
+                                let value = protocol::read_string(&mut buffer).await?;
+                                let has_signature = buffer.read_u8().await?;
+                                if has_signature == 1 {
+                                    let _signature = protocol::read_string(&mut buffer).await?;
+                                }
+                            }
+
+                            if version.into_inner() == 2 {
+                                let mut _ignored = vec![0u8; 8 + 512 + 4096];
+                                buffer.read_exact(&mut signature)?;
+                            }
+                        }
+                        _ => {
+                            // this state should be almost impossible to reach.
+                            // however, we all know what happens with supposedly unreachable code.
+                            return Err(anyhow!("Raw connection from {:?}", self.peer))
+                        }
+                    }
+
+                    // Proceed with normal login sequence
 
                     // Send login success
 
                     let response = PacketBuilder::new(0x02)
                         .with_uuid(0)
-                        .with_string(&username)
+                        .with_string(&self.username)
                         .with_var_int(0)
-                        // .with_bool(false) 1.20.5+
                         .build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
+                    self.send_packet(stream, response).await?;
 
                     let registry_codec = nbt::from_json(include_str!("registry_codec.json"));
 
@@ -182,7 +160,6 @@ impl State {
                         .with_var_int(1) // dim count
                         .with_string("minecraft:the_end") // dim name
                         .with_nbt(&registry_codec)
-                        // .with_raw_bytes(&[0x0a, 0x00, 0x00, 0x00]) // empty NBT
                         .with_string("minecraft:the_end") // dimension type
                         .with_string("minecraft:the_end") // dimension name
                         .with_i64(0) // hashed (and truncated) seed
@@ -194,40 +171,30 @@ impl State {
                         .with_bool(true) // is debug
                         .with_bool(false) // is flat
                         .with_bool(false) // has death location
-                        // .with_string("minecraft:the_end") // world name
-                        // .with_position(0, 0, 0)
                         .build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
-
-                    println!("Login success");
-
-                    self.state = 3;
+                    self.send_packet(stream, response).await?;
 
                     // Send slot select
                     let response = PacketBuilder::new(0x4a)
                         .with_u8(0) // slot index
                         .build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
+                    self.send_packet(stream, response).await?;
 
                     // Send update recipes
                     let response = PacketBuilder::new(0x6a)
                         .with_var_int(0) // recipe count
                         .build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
+                    self.send_packet(stream, response).await?;
 
                     // Send update tags
                     let response = PacketBuilder::new(0x6b)
                         .with_var_int(0) // count
                         .build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
+                    self.send_packet(stream, response).await?;
 
                     // Send entity event
                     let response = PacketBuilder::new(0x1a)
@@ -235,8 +202,7 @@ impl State {
                         .with_u8(28) // value
                         .build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
+                    self.send_packet(stream, response).await?;
 
                     // Send synchronize player position
                     let response = PacketBuilder::new(0x39)
@@ -250,8 +216,7 @@ impl State {
                         .with_bool(false) // dismount vehicle
                         .build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
+                    self.send_packet(stream, response).await?;
 
                     // Send empty player info
                     let response = PacketBuilder::new(0x37)
@@ -259,8 +224,7 @@ impl State {
                         .with_var_int(0) // player count
                         .build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
+                    self.send_packet(stream, response).await?;
 
                     // Send set center chunk
                     let response = PacketBuilder::new(0x4b)
@@ -268,13 +232,7 @@ impl State {
                         .with_var_int(0) // z
                         .build();
 
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
-
-                    stream.write_all(&response).await?;
-                    stream.flush().await?;
-
-                    println!("Sending chunks");
+                    self.send_packet(stream, response).await?;
 
                     // // Begin sending chunks
 
@@ -329,10 +287,11 @@ impl State {
                     stream.write_all(&response).await?;
                     stream.flush().await?;
 
-                    match self.context.lock().await.player_exists(&username).await {
+                    log::info!("{} [{:?}] has connected to the login server.", self.username, self.peer);
+
+                    match self.context.lock().await.player_exists(&self.username).await {
                         Ok(b) => match b {
                             false => {
-                                println!("Player nx");
                                 let response = PacketBuilder::new(0x5d)
                                     .with_string("{\"text\":\"/register [password] [password]\"}")
                                     .build();
@@ -350,7 +309,7 @@ impl State {
                             }
                         },
                         Err(e) => {
-                            eprintln!("DB ERROR: {:?}", e);
+                            log::error!("Database error: {:?}", e);
 
                             return self
                                 .kick(stream, "Database error. Please contact one of the admins.")
@@ -358,23 +317,17 @@ impl State {
                         }
                     }
 
-                    // let response = PacketBuilder::new(0x5d)
-                    //     .with_string("{\"text\":\"Please log in.\"}")
-                    //     .build();
-
                     stream.write_all(&response).await?;
                     stream.flush().await?;
 
-                    println!("Finished login sequence");
+                    // Switch over to the "play" state
+                    self.state = 3;
                 }
-                _ => {
-                    println!("Login: Unknown packet ID");
-                }
+                _ => ()
             },
             3 => {
                 match packet_id {
                     0x20 => {
-                        println!("Keepalive C2S");
                         let payload = buffer.read_i32::<BigEndian>().await?;
 
                         stream
@@ -383,20 +336,12 @@ impl State {
                         stream.flush().await?;
                     }
                     0x12 => {
-                        println!("Keepalive C2S (long)");
                         let payload = buffer.read_i64::<BigEndian>().await?;
 
                         stream
                             .write_all(&PacketBuilder::new(0x20).with_i64(payload).build())
                             .await?;
                         stream.flush().await?;
-                    }
-                    0x5 => {
-                        let message = protocol::read_string(&mut buffer).await?;
-                        match &self.username {
-                            Some(username) => println!("{username}: {message}"),
-                            None => println!("<unknown>: {message}"),
-                        }
                     }
                     0x4 => {
                         let command = protocol::read_string(&mut buffer).await?;
@@ -412,19 +357,27 @@ impl State {
                                 }
 
                                 let password = args[1];
-                                let Some(ref username) = self.username else {
-                                    return self.kick(stream, "Internal error.").await;
-                                };
 
-                                match self.context.lock().await.authenticate(username, password).await {
+                                match self
+                                    .context
+                                    .lock()
+                                    .await
+                                    .authenticate(&self.username, password)
+                                    .await
+                                {
                                     Ok(success) => match success {
                                         false => {
+                                            log::warn!("{} [{:?}] has specified an incorrect password.", self.username, self.peer);
                                             return self
-                                                .kick(stream, "Invalid password or user not registered.")
+                                                .kick(
+                                                    stream,
+                                                    "Invalid password or user not registered.",
+                                                )
                                                 .await;
                                         }
                                         true => {
-                                            println!("Login successful for {}", username);
+                                            log::info!("{} [{:?}] has successfully authenticated.", self.username, self.peer);
+
                                             stream
                                                 .write_all(
                                                     &PacketBuilder::new(0x16)
@@ -438,7 +391,7 @@ impl State {
                                         }
                                     },
                                     Err(e) => {
-                                        eprintln!("DB ERROR: {:?}", e);
+                                        log::error!("Database error: {:?}", e);
 
                                         return self
                                             .kick(
@@ -461,19 +414,16 @@ impl State {
                                     }
                                 }
 
-                                let Some(ref username) = self.username else {
-                                    return self.kick(stream, "Internal error.").await;
-                                };
-
-                                match self.context.lock().await.register(username, password).await {
+                                match self.context.lock().await.register(&self.username, password).await {
                                     Ok(success) => match success {
                                         false => {
+                                            log::warn!("{} [{:?}] attempted double registration.", self.username, self.peer);
                                             return self
                                                 .kick(stream, "This user is already registered.")
                                                 .await;
                                         }
                                         true => {
-                                            println!("Registration successful for {}", username);
+                                            log::info!("{} [{:?}] has successfully registered.", self.username, self.peer);
                                             stream
                                                 .write_all(
                                                     &PacketBuilder::new(0x16)
@@ -487,7 +437,7 @@ impl State {
                                         }
                                     },
                                     Err(e) => {
-                                        eprintln!("DB ERROR: {:?}", e);
+                                        log::error!("Database error: {:?}", e);
 
                                         return self
                                             .kick(
@@ -503,20 +453,18 @@ impl State {
                             }
                         }
                     }
-                    _ => {
-                        // println!("Play: Unknown packet ID {packet_id:02x}");
-                    }
+                    _ => ()
                 }
             }
             _ => {
-                println!("Unknown state");
+                return Err(anyhow!("Unknown connection state."))
             }
         }
 
         Ok(())
     }
 
-    pub async fn kick(& self, stream: &mut TcpStream, reason: impl Into<String>) -> Result<()> {
+    pub async fn kick(&self, stream: &mut TcpStream, reason: impl Into<String>) -> Result<()> {
         let reason = reason.into();
         let response = PacketBuilder::new(0x19)
             .with_string(&format!("{{\"text\":\"{reason}\"}}"))
@@ -525,16 +473,20 @@ impl State {
         stream.write_all(&response).await?;
         stream.flush().await?;
 
-        return Err(anyhow!("Kicked player {:?} with reason {}", self.username, reason))
+        return Err(anyhow!(
+            "Kicked player {} [{:?}] with reason: \"{}\"",
+            self.username,
+            self.peer,
+            reason
+        ));
     }
 
-    pub async fn connect(mut self, mut stream: tokio::net::TcpStream, peer: SocketAddr) {
-        self.peer = Some(peer);
+    pub async fn connect(mut self, mut stream: tokio::net::TcpStream) {
         loop {
             match self.receive_packet(&mut stream).await {
                 Ok(_) => {}
                 Err(e) => {
-                    println!("Error: {:?}", e);
+                    log::error!("{:?}", e);
                     break;
                 }
             }
@@ -542,26 +494,41 @@ impl State {
                 break;
             }
         }
-        println!("Connection closed");
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:30067").await?;
+    simplelog::TermLogger::init(
+        log::LevelFilter::Info,
+        simplelog::Config::default(),
+        simplelog::TerminalMode::Mixed,
+        simplelog::ColorChoice::Auto,
+    )?;
+
+    let socket = match std::env::args().nth(1) {
+        Some(socket) => socket,
+        None => {
+            eprintln!("You must specify an address and port.");
+            eprintln!("Usage: ./void-rs [ip:port]");
+            return Err(anyhow!("unspecified socket address"));
+        }
+    };
+
+    let listener = TcpListener::bind(socket).await?;
     let context = Context {
-        db: login::init_db().await?,
+        db: db::init_db().await?,
     };
     let context = Arc::new(Mutex::new(context));
 
     loop {
         let (socket, peer) = listener.accept().await?;
 
-        println!("Accepted connection from: {}", socket.peer_addr()?);
+        log::debug!("Accepted connection from: {}", socket.peer_addr()?);
 
-        let state = State::new(Arc::clone(&context));
+        let state = State::new(Arc::clone(&context), peer);
         tokio::spawn(async move {
-            state.connect(socket, peer).await;
+            state.connect(socket).await;
         });
     }
 }

@@ -1,4 +1,4 @@
-use crate::nbt::{NamedTag, NBT};
+use crate::nbt::NamedTag;
 
 use super::varint::VarInt;
 
@@ -103,5 +103,11 @@ impl PacketBuilder {
         buf.extend_from_slice(&id.to_bytes());
         buf.extend_from_slice(&self.buffer);
         buf
+    }
+}
+
+impl Into<Vec<u8>> for PacketBuilder {
+    fn into(self) -> Vec<u8> {
+        self.build()
     }
 }
