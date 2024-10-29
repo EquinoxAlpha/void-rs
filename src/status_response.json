@@ -1,0 +1,15 @@
+{
+    "version": {
+        "name": "1.19.2",
+        "protocol": 760
+    },
+    "players": {
+        "max": 0,
+        "online": 0,
+        "sample": []
+    },
+    "description": {
+        "text": "test"
+    },
+    "enforcesSecureChat": false
+}
