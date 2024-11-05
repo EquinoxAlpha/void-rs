@@ -52,7 +52,10 @@ impl State {
     }
 
     pub async fn receive_packet(&mut self, stream: &mut TcpStream) -> Result<()> {
-        let (packet_id, buffer) = protocol::read_generic_packet(stream).await?;
+        let Ok((packet_id, buffer)) = protocol::read_generic_packet(stream).await else {
+            self.state = -1;
+            return Ok(());
+        };
         let mut buffer = Cursor::new(buffer);
 
         match self.state {
@@ -132,8 +135,6 @@ impl State {
                             }
                         }
                         _ => {
-                            // this state should be almost impossible to reach.
-                            // however, we all know what happens with supposedly unreachable code.
                             return Err(anyhow!("Raw connection from {:?}", self.peer))
                         }
                     }
@@ -499,12 +500,40 @@ impl State {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    simplelog::TermLogger::init(
-        log::LevelFilter::Info,
-        simplelog::Config::default(),
-        simplelog::TerminalMode::Mixed,
-        simplelog::ColorChoice::Auto,
-    )?;
+    let console_dispatch = fern::Dispatch::new()
+        .format(|out, message, record| {
+            let colors = fern::colors::ColoredLevelConfig::new()
+                .info(fern::colors::Color::Green)
+                .warn(fern::colors::Color::Yellow)
+                .error(fern::colors::Color::Red)
+                .debug(fern::colors::Color::Blue)
+                .trace(fern::colors::Color::Magenta);
+
+            out.finish(format_args!(
+                "[{}][{}] {}",
+                chrono::Local::now().to_rfc3339(),
+                colors.color(record.level()),
+                message
+            ))
+        })
+        .chain(std::io::stdout());
+
+    let file_dispatch = fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{}][{}] {}",
+                chrono::Local::now().to_rfc3339(),
+                record.level(),
+                message
+            ))
+        })
+        .chain(fern::log_file("server.log")?);
+
+    fern::Dispatch::new()
+        .level(log::LevelFilter::Info)
+        .chain(console_dispatch)
+        .chain(file_dispatch)
+        .apply()?;
 
     let socket = match std::env::args().nth(1) {
         Some(socket) => socket,
@@ -515,11 +544,13 @@ async fn main() -> Result<()> {
         }
     };
 
-    let listener = TcpListener::bind(socket).await?;
+    let listener = TcpListener::bind(&socket).await?;
     let context = Context {
         db: db::init_db().await?,
     };
     let context = Arc::new(Mutex::new(context));
+
+    log::info!("Listening on {}", socket);
 
     loop {
         let (socket, peer) = listener.accept().await?;

@@ -23,3 +23,4 @@ Cargo.lock
 database/
 
 sync.sh
+server.log
